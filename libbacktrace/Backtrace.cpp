@@ -14,73 +14,55 @@
  * limitations under the License.
  */
 
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ptrace.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#define __STDC_FORMAT_MACROS
 #include <inttypes.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <ucontext.h>
 
 #include <string>
 
+#include <base/stringprintf.h>
+
 #include <backtrace/Backtrace.h>
-#include <cutils/log.h>
+#include <backtrace/BacktraceMap.h>
 
-#include "Backtrace.h"
+#include <cutils/threads.h>
+
+#include "BacktraceLog.h"
 #include "thread_utils.h"
+#include "UnwindCurrent.h"
+#include "UnwindPtrace.h"
 
-//-------------------------------------------------------------------------
-// BacktraceImpl functions.
-//-------------------------------------------------------------------------
-backtrace_t* BacktraceImpl::GetBacktraceData() {
-  return &backtrace_obj_->backtrace_;
-}
+using android::base::StringPrintf;
 
 //-------------------------------------------------------------------------
 // Backtrace functions.
 //-------------------------------------------------------------------------
-Backtrace::Backtrace(BacktraceImpl* impl) : impl_(impl), map_info_(NULL) {
-  impl_->SetParent(this);
-  backtrace_.num_frames = 0;
-  backtrace_.pid = -1;
-  backtrace_.tid = -1;
+Backtrace::Backtrace(pid_t pid, pid_t tid, BacktraceMap* map)
+    : pid_(pid), tid_(tid), map_(map), map_shared_(true) {
+  if (map_ == nullptr) {
+    map_ = BacktraceMap::Create(pid);
+    map_shared_ = false;
+  }
 }
 
 Backtrace::~Backtrace() {
-  for (size_t i = 0; i < NumFrames(); i++) {
-    if (backtrace_.frames[i].func_name) {
-      free(backtrace_.frames[i].func_name);
-      backtrace_.frames[i].func_name = NULL;
-    }
+  if (map_ && !map_shared_) {
+    delete map_;
+    map_ = nullptr;
   }
-
-  if (map_info_) {
-    backtrace_destroy_map_info_list(map_info_);
-    map_info_ = NULL;
-  }
-
-  if (impl_) {
-    delete impl_;
-    impl_ = NULL;
-  }
-}
-
-bool Backtrace::Unwind(size_t num_ignore_frames) {
-  return impl_->Unwind(num_ignore_frames);
 }
 
 extern "C" char* __cxa_demangle(const char* mangled, char* buf, size_t* len,
                                 int* status);
 
 std::string Backtrace::GetFunctionName(uintptr_t pc, uintptr_t* offset) {
-  std::string func_name = impl_->GetFunctionNameRaw(pc, offset);
+  std::string func_name = GetFunctionNameRaw(pc, offset);
   if (!func_name.empty()) {
 #if defined(__APPLE__)
     // Mac OS' __cxa_demangle demangles "f" as "float"; last tested on 10.7.
-    if (symbol_name[0] != '_') {
+    if (func_name[0] != '_') {
       return func_name;
     }
 #endif
@@ -93,215 +75,63 @@ std::string Backtrace::GetFunctionName(uintptr_t pc, uintptr_t* offset) {
   return func_name;
 }
 
-bool Backtrace::VerifyReadWordArgs(uintptr_t ptr, uint32_t* out_value) {
-  if (ptr & 3) {
-    BACK_LOGW("invalid pointer %p", (void*)ptr);
-    *out_value = (uint32_t)-1;
+bool Backtrace::VerifyReadWordArgs(uintptr_t ptr, word_t* out_value) {
+  if (ptr & (sizeof(word_t)-1)) {
+    BACK_LOGW("invalid pointer %p", reinterpret_cast<void*>(ptr));
+    *out_value = static_cast<word_t>(-1);
     return false;
   }
   return true;
-}
-
-const char* Backtrace::GetMapName(uintptr_t pc, uintptr_t* map_start) {
-  const backtrace_map_info_t* map_info = FindMapInfo(pc);
-  if (map_info) {
-    if (map_start) {
-      *map_start = map_info->start;
-    }
-    return map_info->name;
-  }
-  return NULL;
-}
-
-const backtrace_map_info_t* Backtrace::FindMapInfo(uintptr_t ptr) {
-  return backtrace_find_map_info(map_info_, ptr);
 }
 
 std::string Backtrace::FormatFrameData(size_t frame_num) {
-  backtrace_frame_data_t* frame = &backtrace_.frames[frame_num];
+  if (frame_num >= frames_.size()) {
+    return "";
+  }
+  return FormatFrameData(&frames_[frame_num]);
+}
+
+std::string Backtrace::FormatFrameData(const backtrace_frame_data_t* frame) {
   const char* map_name;
-  if (frame->map_name) {
-    map_name = frame->map_name;
+  if (BacktraceMap::IsValid(frame->map) && !frame->map.name.empty()) {
+    map_name = frame->map.name.c_str();
   } else {
     map_name = "<unknown>";
   }
-  uintptr_t relative_pc;
-  if (frame->map_offset) {
-    relative_pc = frame->map_offset;
-  } else {
-    relative_pc = frame->pc;
-  }
 
-  char buf[512];
-  if (frame->func_name && frame->func_offset) {
-    snprintf(buf, sizeof(buf), "#%02zu pc %0*" PRIxPTR "  %s (%s+%" PRIuPTR ")",
-             frame_num, (int)sizeof(uintptr_t)*2, relative_pc, map_name,
-             frame->func_name, frame->func_offset);
-  } else if (frame->func_name) {
-    snprintf(buf, sizeof(buf), "#%02zu pc %0*" PRIxPTR "  %s (%s)", frame_num,
-             (int)sizeof(uintptr_t)*2, relative_pc, map_name, frame->func_name);
-  } else {
-    snprintf(buf, sizeof(buf), "#%02zu pc %0*" PRIxPTR "  %s", frame_num,
-             (int)sizeof(uintptr_t)*2, relative_pc, map_name);
-  }
+  uintptr_t relative_pc = BacktraceMap::GetRelativePc(frame->map, frame->pc);
 
-  return buf;
-}
-
-//-------------------------------------------------------------------------
-// BacktraceCurrent functions.
-//-------------------------------------------------------------------------
-BacktraceCurrent::BacktraceCurrent(BacktraceImpl* impl) : Backtrace(impl) {
-  map_info_ = backtrace_create_map_info_list(-1);
-
-  backtrace_.pid = getpid();
-}
-
-BacktraceCurrent::~BacktraceCurrent() {
-}
-
-bool BacktraceCurrent::ReadWord(uintptr_t ptr, uint32_t* out_value) {
-  if (!VerifyReadWordArgs(ptr, out_value)) {
-    return false;
-  }
-
-  const backtrace_map_info_t* map_info = FindMapInfo(ptr);
-  if (map_info && map_info->is_readable) {
-    *out_value = *reinterpret_cast<uint32_t*>(ptr);
-    return true;
-  } else {
-    BACK_LOGW("pointer %p not in a readable map", reinterpret_cast<void*>(ptr));
-    *out_value = static_cast<uint32_t>(-1);
-    return false;
-  }
-}
-
-//-------------------------------------------------------------------------
-// BacktracePtrace functions.
-//-------------------------------------------------------------------------
-BacktracePtrace::BacktracePtrace(BacktraceImpl* impl, pid_t pid, pid_t tid)
-    : Backtrace(impl) {
-  map_info_ = backtrace_create_map_info_list(tid);
-
-  backtrace_.pid = pid;
-  backtrace_.tid = tid;
-}
-
-BacktracePtrace::~BacktracePtrace() {
-}
-
-bool BacktracePtrace::ReadWord(uintptr_t ptr, uint32_t* out_value) {
-  if (!VerifyReadWordArgs(ptr, out_value)) {
-    return false;
-  }
-
-#if defined(__APPLE__)
-  BACK_LOGW("MacOS does not support reading from another pid.");
-  return false;
-#else
-  // ptrace() returns -1 and sets errno when the operation fails.
-  // To disambiguate -1 from a valid result, we clear errno beforehand.
-  errno = 0;
-  *out_value = ptrace(PTRACE_PEEKTEXT, Tid(), reinterpret_cast<void*>(ptr), NULL);
-  if (*out_value == static_cast<uint32_t>(-1) && errno) {
-    BACK_LOGW("invalid pointer %p reading from tid %d, ptrace() strerror(errno)=%s",
-              reinterpret_cast<void*>(ptr), Tid(), strerror(errno));
-    return false;
-  }
-  return true;
-#endif
-}
-
-Backtrace* Backtrace::Create(pid_t pid, pid_t tid) {
-  if (pid == BACKTRACE_CURRENT_PROCESS || pid == getpid()) {
-    if (tid == BACKTRACE_NO_TID || tid == gettid()) {
-      return CreateCurrentObj();
-    } else {
-      return CreateThreadObj(tid);
+  std::string line(StringPrintf("#%02zu pc %" PRIPTR "  %s", frame->num, relative_pc, map_name));
+  if (!frame->func_name.empty()) {
+    line += " (" + frame->func_name;
+    if (frame->func_offset) {
+      line += StringPrintf("+%" PRIuPTR, frame->func_offset);
     }
-  } else if (tid == BACKTRACE_NO_TID) {
-    return CreatePtraceObj(pid, pid);
+    line += ')';
+  }
+
+  return line;
+}
+
+void Backtrace::FillInMap(uintptr_t pc, backtrace_map_t* map) {
+  if (map_ != nullptr) {
+    map_->FillIn(pc, map);
+  }
+}
+
+Backtrace* Backtrace::Create(pid_t pid, pid_t tid, BacktraceMap* map) {
+  if (pid == BACKTRACE_CURRENT_PROCESS) {
+    pid = getpid();
+    if (tid == BACKTRACE_CURRENT_THREAD) {
+      tid = gettid();
+    }
+  } else if (tid == BACKTRACE_CURRENT_THREAD) {
+    tid = pid;
+  }
+
+  if (pid == getpid()) {
+    return new UnwindCurrent(pid, tid, map);
   } else {
-    return CreatePtraceObj(pid, tid);
-  }
-}
-
-//-------------------------------------------------------------------------
-// Common interface functions.
-//-------------------------------------------------------------------------
-bool backtrace_create_context(
-    backtrace_context_t* context, pid_t pid, pid_t tid, size_t num_ignore_frames) {
-  Backtrace* backtrace = Backtrace::Create(pid, tid);
-  if (!backtrace) {
-    return false;
-  }
-  if (!backtrace->Unwind(num_ignore_frames)) {
-    delete backtrace;
-    return false;
-  }
-
-  context->data = backtrace;
-  context->backtrace = backtrace->GetBacktrace();
-  return true;
-}
-
-void backtrace_destroy_context(backtrace_context_t* context) {
-  if (context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    delete backtrace;
-    context->data = NULL;
-  }
-  context->backtrace = NULL;
-}
-
-const backtrace_t* backtrace_get_data(backtrace_context_t* context) {
-  if (context && context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    return backtrace->GetBacktrace();
-  }
-  return NULL;
-}
-
-bool backtrace_read_word(const backtrace_context_t* context, uintptr_t ptr, uint32_t* value) {
-  if (context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    return backtrace->ReadWord(ptr, value);
-  }
-  return true;
-}
-
-const char* backtrace_get_map_name(const backtrace_context_t* context, uintptr_t pc, uintptr_t* map_start) {
-  if (context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    return backtrace->GetMapName(pc, map_start);
-  }
-  return NULL;
-}
-
-char* backtrace_get_func_name(const backtrace_context_t* context, uintptr_t pc, uintptr_t* func_offset) {
-  if (context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    std::string func_name = backtrace->GetFunctionName(pc, func_offset);
-    if (!func_name.empty()) {
-      return strdup(func_name.c_str());
-    }
-  }
-  return NULL;
-}
-
-void backtrace_format_frame_data(
-    const backtrace_context_t* context, size_t frame_num, char* buf,
-    size_t buf_size) {
-  if (buf_size == 0 || buf == NULL) {
-    BACK_LOGW("bad call buf %p buf_size %zu", buf, buf_size);
-  } else if (context->data) {
-    Backtrace* backtrace = reinterpret_cast<Backtrace*>(context->data);
-    std::string line = backtrace->FormatFrameData(frame_num);
-    if (line.size() > buf_size) {
-      memcpy(buf, line.c_str(), buf_size-1);
-      buf[buf_size] = '\0';
-    } else {
-      memcpy(buf, line.c_str(), line.size()+1);
-    }
+    return new UnwindPtrace(pid, tid, map);
   }
 }

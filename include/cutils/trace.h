@@ -17,18 +17,16 @@
 #ifndef _LIBS_CUTILS_TRACE_H
 #define _LIBS_CUTILS_TRACE_H
 
+#include <inttypes.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <unistd.h>
-#include <cutils/compiler.h>
 
-#ifdef ANDROID_SMP
-#include <cutils/atomic-inline.h>
-#else
-#include <cutils/atomic.h>
-#endif
+#include <cutils/compiler.h>
 
 __BEGIN_DECLS
 
@@ -66,7 +64,10 @@ __BEGIN_DECLS
 #define ATRACE_TAG_APP              (1<<12)
 #define ATRACE_TAG_RESOURCES        (1<<13)
 #define ATRACE_TAG_DALVIK           (1<<14)
-#define ATRACE_TAG_LAST             ATRACE_TAG_DALVIK
+#define ATRACE_TAG_RS               (1<<15)
+#define ATRACE_TAG_BIONIC           (1<<16)
+#define ATRACE_TAG_POWER            (1<<17)
+#define ATRACE_TAG_LAST             ATRACE_TAG_POWER
 
 // Reserved for initialization.
 #define ATRACE_TAG_NOT_READY        (1LL<<63)
@@ -78,14 +79,6 @@ __BEGIN_DECLS
 #elif ATRACE_TAG > ATRACE_TAG_VALID_MASK
 #error ATRACE_TAG must be defined to be one of the tags defined in cutils/trace.h
 #endif
-
-#ifdef HAVE_ANDROID_OS
-/**
- * Maximum size of a message that can be logged to the trace buffer.
- * Note this message includes a tag, the pid, and the string given as the name.
- * Names should be kept short to get the most use of the trace buffer.
- */
-#define ATRACE_MESSAGE_LENGTH 1024
 
 /**
  * Opens the trace file for writing and reads the property for initial tags.
@@ -120,7 +113,7 @@ void atrace_set_tracing_enabled(bool enabled);
  * Nonzero indicates setup has completed.
  * Note: This does NOT indicate whether or not setup was successful.
  */
-extern volatile int32_t atrace_is_ready;
+extern atomic_bool atrace_is_ready;
 
 /**
  * Set of ATRACE_TAG flags to trace for, initialized to ATRACE_TAG_NOT_READY.
@@ -143,7 +136,7 @@ extern int atrace_marker_fd;
 #define ATRACE_INIT() atrace_init()
 static inline void atrace_init()
 {
-    if (CC_UNLIKELY(!android_atomic_acquire_load(&atrace_is_ready))) {
+    if (CC_UNLIKELY(!atomic_load_explicit(&atrace_is_ready, memory_order_acquire))) {
         atrace_setup();
     }
 }
@@ -179,11 +172,8 @@ static inline uint64_t atrace_is_tag_enabled(uint64_t tag)
 static inline void atrace_begin(uint64_t tag, const char* name)
 {
     if (CC_UNLIKELY(atrace_is_tag_enabled(tag))) {
-        char buf[ATRACE_MESSAGE_LENGTH];
-        size_t len;
-
-        len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "B|%d|%s", getpid(), name);
-        write(atrace_marker_fd, buf, len);
+        void atrace_begin_body(const char*);
+        atrace_begin_body(name);
     }
 }
 
@@ -213,12 +203,8 @@ static inline void atrace_async_begin(uint64_t tag, const char* name,
         int32_t cookie)
 {
     if (CC_UNLIKELY(atrace_is_tag_enabled(tag))) {
-        char buf[ATRACE_MESSAGE_LENGTH];
-        size_t len;
-
-        len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "S|%d|%s|%d", getpid(),
-                name, cookie);
-        write(atrace_marker_fd, buf, len);
+        void atrace_async_begin_body(const char*, int32_t);
+        atrace_async_begin_body(name, cookie);
     }
 }
 
@@ -227,19 +213,13 @@ static inline void atrace_async_begin(uint64_t tag, const char* name,
  * This should have a corresponding ATRACE_ASYNC_BEGIN.
  */
 #define ATRACE_ASYNC_END(name, cookie) atrace_async_end(ATRACE_TAG, name, cookie)
-static inline void atrace_async_end(uint64_t tag, const char* name,
-        int32_t cookie)
+static inline void atrace_async_end(uint64_t tag, const char* name, int32_t cookie)
 {
     if (CC_UNLIKELY(atrace_is_tag_enabled(tag))) {
-        char buf[ATRACE_MESSAGE_LENGTH];
-        size_t len;
-
-        len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "F|%d|%s|%d", getpid(),
-                name, cookie);
-        write(atrace_marker_fd, buf, len);
+        void atrace_async_end_body(const char*, int32_t);
+        atrace_async_end_body(name, cookie);
     }
 }
-
 
 /**
  * Traces an integer counter value.  name is used to identify the counter.
@@ -249,27 +229,23 @@ static inline void atrace_async_end(uint64_t tag, const char* name,
 static inline void atrace_int(uint64_t tag, const char* name, int32_t value)
 {
     if (CC_UNLIKELY(atrace_is_tag_enabled(tag))) {
-        char buf[ATRACE_MESSAGE_LENGTH];
-        size_t len;
-
-        len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "C|%d|%s|%d",
-                getpid(), name, value);
-        write(atrace_marker_fd, buf, len);
+        void atrace_int_body(const char*, int32_t);
+        atrace_int_body(name, value);
     }
 }
 
-#else // not HAVE_ANDROID_OS
-
-#define ATRACE_INIT()
-#define ATRACE_GET_ENABLED_TAGS()
-#define ATRACE_ENABLED()
-#define ATRACE_BEGIN(name)
-#define ATRACE_END()
-#define ATRACE_ASYNC_BEGIN(name, cookie)
-#define ATRACE_ASYNC_END(name, cookie)
-#define ATRACE_INT(name, value)
-
-#endif // not HAVE_ANDROID_OS
+/**
+ * Traces a 64-bit integer counter value.  name is used to identify the
+ * counter. This can be used to track how a value changes over time.
+ */
+#define ATRACE_INT64(name, value) atrace_int64(ATRACE_TAG, name, value)
+static inline void atrace_int64(uint64_t tag, const char* name, int64_t value)
+{
+    if (CC_UNLIKELY(atrace_is_tag_enabled(tag))) {
+        void atrace_int64_body(const char*, int64_t);
+        atrace_int64_body(name, value);
+    }
+}
 
 __END_DECLS
 

@@ -17,11 +17,40 @@
 #ifndef _BACKTRACE_BACKTRACE_H
 #define _BACKTRACE_BACKTRACE_H
 
-#include <backtrace/backtrace.h>
+#include <inttypes.h>
+#include <stdint.h>
 
 #include <string>
+#include <vector>
 
-class BacktraceImpl;
+#include <backtrace/backtrace_constants.h>
+#include <backtrace/BacktraceMap.h>
+
+#if __LP64__
+#define PRIPTR "016" PRIxPTR
+typedef uint64_t word_t;
+#else
+#define PRIPTR "08" PRIxPTR
+typedef uint32_t word_t;
+#endif
+
+struct backtrace_frame_data_t {
+  size_t num;             // The current fame number.
+  uintptr_t pc;           // The absolute pc.
+  uintptr_t sp;           // The top of the stack.
+  size_t stack_size;      // The size of the stack, zero indicate an unknown stack size.
+  backtrace_map_t map;    // The map associated with the given pc.
+  std::string func_name;  // The function name associated with this pc, NULL if not found.
+  uintptr_t func_offset;  // pc relative to the start of the function, only valid if func_name is not NULL.
+};
+
+#if defined(__APPLE__)
+struct __darwin_ucontext;
+typedef __darwin_ucontext ucontext_t;
+#else
+struct ucontext;
+typedef ucontext ucontext_t;
+#endif
 
 class Backtrace {
 public:
@@ -33,54 +62,75 @@ public:
   // If pid >= 0 and tid < 0, then the Backtrace object corresponds to a
   // different process.
   // Tracing a thread in a different process is not supported.
-  static Backtrace* Create(pid_t pid, pid_t tid);
+  // If map is NULL, then create the map and manage it internally.
+  // If map is not NULL, the map is still owned by the caller.
+  static Backtrace* Create(pid_t pid, pid_t tid, BacktraceMap* map = NULL);
 
   virtual ~Backtrace();
 
   // Get the current stack trace and store in the backtrace_ structure.
-  virtual bool Unwind(size_t num_ignore_frames);
+  virtual bool Unwind(size_t num_ignore_frames, ucontext_t* context = NULL) = 0;
 
   // Get the function name and offset into the function given the pc.
   // If the string is empty, then no valid function name was found.
   virtual std::string GetFunctionName(uintptr_t pc, uintptr_t* offset);
 
-  // Get the name of the map associated with the given pc. If NULL is returned,
-  // then map_start is not set. Otherwise, map_start is the beginning of this
-  // map.
-  virtual const char* GetMapName(uintptr_t pc, uintptr_t* map_start);
-
-  // Finds the memory map associated with the given ptr.
-  virtual const backtrace_map_info_t* FindMapInfo(uintptr_t ptr);
+  // Fill in the map data associated with the given pc.
+  virtual void FillInMap(uintptr_t pc, backtrace_map_t* map);
 
   // Read the data at a specific address.
-  virtual bool ReadWord(uintptr_t ptr, uint32_t* out_value) = 0;
+  virtual bool ReadWord(uintptr_t ptr, word_t* out_value) = 0;
+
+  // Read arbitrary data from a specific address. If a read request would
+  // span from one map to another, this call only reads up until the end
+  // of the current map.
+  // Returns the total number of bytes actually read.
+  virtual size_t Read(uintptr_t addr, uint8_t* buffer, size_t bytes) = 0;
 
   // Create a string representing the formatted line of backtrace information
   // for a single frame.
   virtual std::string FormatFrameData(size_t frame_num);
+  virtual std::string FormatFrameData(const backtrace_frame_data_t* frame);
 
-  pid_t Pid() { return backtrace_.pid; }
-  pid_t Tid() { return backtrace_.tid; }
-  size_t NumFrames() { return backtrace_.num_frames; }
-
-  const backtrace_t* GetBacktrace() { return &backtrace_; }
+  pid_t Pid() const { return pid_; }
+  pid_t Tid() const { return tid_; }
+  size_t NumFrames() const { return frames_.size(); }
 
   const backtrace_frame_data_t* GetFrame(size_t frame_num) {
-    return &backtrace_.frames[frame_num];
+    if (frame_num >= frames_.size()) {
+      return NULL;
+    }
+    return &frames_[frame_num];
   }
 
+  typedef std::vector<backtrace_frame_data_t>::iterator iterator;
+  iterator begin() { return frames_.begin(); }
+  iterator end() { return frames_.end(); }
+
+  typedef std::vector<backtrace_frame_data_t>::const_iterator const_iterator;
+  const_iterator begin() const { return frames_.begin(); }
+  const_iterator end() const { return frames_.end(); }
+
+  BacktraceMap* GetMap() { return map_; }
+
 protected:
-  Backtrace(BacktraceImpl* impl);
+  Backtrace(pid_t pid, pid_t tid, BacktraceMap* map);
 
-  virtual bool VerifyReadWordArgs(uintptr_t ptr, uint32_t* out_value);
+  // The name returned is not demangled, GetFunctionName() takes care of
+  // demangling the name.
+  virtual std::string GetFunctionNameRaw(uintptr_t pc, uintptr_t* offset) = 0;
 
-  BacktraceImpl* impl_;
+  virtual bool VerifyReadWordArgs(uintptr_t ptr, word_t* out_value);
 
-  backtrace_map_info_t* map_info_;
+  bool BuildMap();
 
-  backtrace_t backtrace_;
+  pid_t pid_;
+  pid_t tid_;
 
-  friend class BacktraceImpl;
+  BacktraceMap* map_;
+  bool map_shared_;
+
+  std::vector<backtrace_frame_data_t> frames_;
 };
 
 #endif // _BACKTRACE_BACKTRACE_H

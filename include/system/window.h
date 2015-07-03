@@ -22,10 +22,16 @@
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
-#include <sync/sync.h>
 #include <sys/cdefs.h>
 #include <system/graphics.h>
 #include <unistd.h>
+
+#ifndef __UNUSED
+#define __UNUSED __attribute__((__unused__))
+#endif
+#ifndef __deprecated
+#define __deprecated __attribute__((__deprecated__))
+#endif
 
 __BEGIN_DECLS
 
@@ -90,10 +96,10 @@ typedef struct ANativeWindowBuffer
 
     // Implement the methods that sp<ANativeWindowBuffer> expects so that it
     // can be used to automatically refcount ANativeWindowBuffer's.
-    void incStrong(const void* id) const {
+    void incStrong(const void* /*id*/) const {
         common.incRef(const_cast<android_native_base_t*>(&common));
     }
-    void decStrong(const void* id) const {
+    void decStrong(const void* /*id*/) const {
         common.decRef(const_cast<android_native_base_t*>(&common));
     }
 #endif
@@ -230,7 +236,47 @@ enum {
      * Boolean that indicates whether the consumer is running more than
      * one buffer behind the producer.
      */
-    NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND = 9
+    NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND = 9,
+
+    /*
+     * The consumer gralloc usage bits currently set by the consumer.
+     * The values are defined in hardware/libhardware/include/gralloc.h.
+     */
+    NATIVE_WINDOW_CONSUMER_USAGE_BITS = 10,
+
+    /**
+     * Transformation that will by applied to buffers by the hwcomposer.
+     * This must not be set or checked by producer endpoints, and will
+     * disable the transform hint set in SurfaceFlinger (see
+     * NATIVE_WINDOW_TRANSFORM_HINT).
+     *
+     * INTENDED USE:
+     * Temporary - Please do not use this.  This is intended only to be used
+     * by the camera's LEGACY mode.
+     *
+     * In situations where a SurfaceFlinger client wishes to set a transform
+     * that is not visible to the producer, and will always be applied in the
+     * hardware composer, the client can set this flag with
+     * native_window_set_buffers_sticky_transform.  This can be used to rotate
+     * and flip buffers consumed by hardware composer without actually changing
+     * the aspect ratio of the buffers produced.
+     */
+    NATIVE_WINDOW_STICKY_TRANSFORM = 11,
+
+    /**
+     * The default data space for the buffers as set by the consumer.
+     * The values are defined in graphics.h.
+     */
+    NATIVE_WINDOW_DEFAULT_DATASPACE = 12,
+
+    /*
+     * Returns the age of the contents of the most recently dequeued buffer as
+     * the number of frames that have elapsed since it was last queued. For
+     * example, if the window is double-buffered, the age of any given buffer in
+     * steady state will be 2. If the dequeued buffer has never been queued, its
+     * age will be 0.
+     */
+    NATIVE_WINDOW_BUFFER_AGE = 13,
 };
 
 /* Valid operations for the (*perform)() hook.
@@ -261,6 +307,10 @@ enum {
     NATIVE_WINDOW_API_DISCONNECT            = 14,   /* private */
     NATIVE_WINDOW_SET_BUFFERS_USER_DIMENSIONS = 15, /* private */
     NATIVE_WINDOW_SET_POST_TRANSFORM_CROP   = 16,   /* private */
+    NATIVE_WINDOW_SET_BUFFERS_STICKY_TRANSFORM = 17,/* private */
+    NATIVE_WINDOW_SET_SIDEBAND_STREAM       = 18,
+    NATIVE_WINDOW_SET_BUFFERS_DATASPACE     = 19,
+    NATIVE_WINDOW_SET_SURFACE_DAMAGE        = 20,   /* private */
 };
 
 /* parameter for NATIVE_WINDOW_[API_][DIS]CONNECT */
@@ -290,12 +340,15 @@ enum {
     NATIVE_WINDOW_TRANSFORM_FLIP_H = HAL_TRANSFORM_FLIP_H ,
     /* flip source image vertically */
     NATIVE_WINDOW_TRANSFORM_FLIP_V = HAL_TRANSFORM_FLIP_V,
-    /* rotate source image 90 degrees clock-wise */
+    /* rotate source image 90 degrees clock-wise, and is applied after TRANSFORM_FLIP_{H|V} */
     NATIVE_WINDOW_TRANSFORM_ROT_90 = HAL_TRANSFORM_ROT_90,
     /* rotate source image 180 degrees */
     NATIVE_WINDOW_TRANSFORM_ROT_180 = HAL_TRANSFORM_ROT_180,
     /* rotate source image 270 degrees clock-wise */
     NATIVE_WINDOW_TRANSFORM_ROT_270 = HAL_TRANSFORM_ROT_270,
+    /* transforms source by the inverse transform of the screen it is displayed onto. This
+     * transform is applied last */
+    NATIVE_WINDOW_TRANSFORM_INVERSE_DISPLAY = 0x08
 };
 
 /* parameter for NATIVE_WINDOW_SET_SCALING_MODE */
@@ -344,10 +397,10 @@ struct ANativeWindow
 
     /* Implement the methods that sp<ANativeWindow> expects so that it
        can be used to automatically refcount ANativeWindow's. */
-    void incStrong(const void* id) const {
+    void incStrong(const void* /*id*/) const {
         common.incRef(const_cast<android_native_base_t*>(&common));
     }
-    void decStrong(const void* id) const {
+    void decStrong(const void* /*id*/) const {
         common.decRef(const_cast<android_native_base_t*>(&common));
     }
 #endif
@@ -450,30 +503,12 @@ struct ANativeWindow
      * DO NOT CALL THIS HOOK DIRECTLY.  Instead, use the helper functions
      * defined below.
      *
-     *  (*perform)() returns -ENOENT if the 'what' parameter is not supported
-     *  by the surface's implementation.
+     * (*perform)() returns -ENOENT if the 'what' parameter is not supported
+     * by the surface's implementation.
      *
-     * The valid operations are:
-     *     NATIVE_WINDOW_SET_USAGE
-     *     NATIVE_WINDOW_CONNECT               (deprecated)
-     *     NATIVE_WINDOW_DISCONNECT            (deprecated)
-     *     NATIVE_WINDOW_SET_CROP              (private)
-     *     NATIVE_WINDOW_SET_BUFFER_COUNT
-     *     NATIVE_WINDOW_SET_BUFFERS_GEOMETRY  (deprecated)
-     *     NATIVE_WINDOW_SET_BUFFERS_TRANSFORM
-     *     NATIVE_WINDOW_SET_BUFFERS_TIMESTAMP
-     *     NATIVE_WINDOW_SET_BUFFERS_DIMENSIONS
-     *     NATIVE_WINDOW_SET_BUFFERS_FORMAT
-     *     NATIVE_WINDOW_SET_SCALING_MODE       (private)
-     *     NATIVE_WINDOW_LOCK                   (private)
-     *     NATIVE_WINDOW_UNLOCK_AND_POST        (private)
-     *     NATIVE_WINDOW_API_CONNECT            (private)
-     *     NATIVE_WINDOW_API_DISCONNECT         (private)
-     *     NATIVE_WINDOW_SET_BUFFERS_USER_DIMENSIONS (private)
-     *     NATIVE_WINDOW_SET_POST_TRANSFORM_CROP (private)
-     *
+     * See above for a list of valid operations, such as
+     * NATIVE_WINDOW_SET_USAGE or NATIVE_WINDOW_CONNECT
      */
-
     int     (*perform)(struct ANativeWindow* window,
                 int operation, ... );
 
@@ -574,7 +609,7 @@ struct ANativeWindow
   * android_native_window_t is deprecated.
   */
 typedef struct ANativeWindow ANativeWindow;
-typedef struct ANativeWindow android_native_window_t;
+typedef struct ANativeWindow android_native_window_t __deprecated;
 
 /*
  *  native_window_set_usage(..., usage)
@@ -595,13 +630,19 @@ static inline int native_window_set_usage(
 
 /* deprecated. Always returns 0. Don't call. */
 static inline int native_window_connect(
-        struct ANativeWindow* window, int api) {
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) __deprecated;
+
+static inline int native_window_connect(
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) {
     return 0;
 }
 
 /* deprecated. Always returns 0. Don't call. */
 static inline int native_window_disconnect(
-        struct ANativeWindow* window, int api) {
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) __deprecated;
+
+static inline int native_window_disconnect(
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) {
     return 0;
 }
 
@@ -656,6 +697,10 @@ static inline int native_window_set_post_transform_crop(
  */
 static inline int native_window_set_active_rect(
         struct ANativeWindow* window,
+        android_native_rect_t const * active_rect) __deprecated;
+
+static inline int native_window_set_active_rect(
+        struct ANativeWindow* window,
         android_native_rect_t const * active_rect)
 {
     return native_window_set_post_transform_crop(window, active_rect);
@@ -681,6 +726,10 @@ static inline int native_window_set_buffer_count(
  * XXX: This function is deprecated.  The native_window_set_buffers_dimensions
  * and native_window_set_buffers_format functions should be used instead.
  */
+static inline int native_window_set_buffers_geometry(
+        struct ANativeWindow* window,
+        int w, int h, int format) __deprecated;
+
 static inline int native_window_set_buffers_geometry(
         struct ANativeWindow* window,
         int w, int h, int format)
@@ -749,6 +798,26 @@ static inline int native_window_set_buffers_format(
 }
 
 /*
+ * native_window_set_buffers_data_space(..., int dataSpace)
+ * All buffers queued after this call will be associated with the dataSpace
+ * parameter specified.
+ *
+ * dataSpace specifies additional information about the buffer that's dependent
+ * on the buffer format and the endpoints. For example, it can be used to convey
+ * the color space of the image data in the buffer, or it can be used to
+ * indicate that the buffers contain depth measurement data instead of color
+ * images.  The default dataSpace is 0, HAL_DATASPACE_UNKNOWN, unless it has been
+ * overridden by the consumer.
+ */
+static inline int native_window_set_buffers_data_space(
+        struct ANativeWindow* window,
+        android_dataspace_t dataSpace)
+{
+    return window->perform(window, NATIVE_WINDOW_SET_BUFFERS_DATASPACE,
+            dataSpace);
+}
+
+/*
  * native_window_set_buffers_transform(..., int transform)
  * All buffers queued after this call will be displayed transformed according
  * to the transform parameter specified.
@@ -758,6 +827,23 @@ static inline int native_window_set_buffers_transform(
         int transform)
 {
     return window->perform(window, NATIVE_WINDOW_SET_BUFFERS_TRANSFORM,
+            transform);
+}
+
+/*
+ * native_window_set_buffers_sticky_transform(..., int transform)
+ * All buffers queued after this call will be displayed transformed according
+ * to the transform parameter specified applied on top of the regular buffer
+ * transform.  Setting this transform will disable the transform hint.
+ *
+ * Temporary - This is only intended to be used by the LEGACY camera mode, do
+ *   not use this for anything else.
+ */
+static inline int native_window_set_buffers_sticky_transform(
+        struct ANativeWindow* window,
+        int transform)
+{
+    return window->perform(window, NATIVE_WINDOW_SET_BUFFERS_STICKY_TRANSFORM,
             transform);
 }
 
@@ -827,6 +913,41 @@ static inline int native_window_dequeue_buffer_and_wait(ANativeWindow *anw,
     return anw->dequeueBuffer_DEPRECATED(anw, anb);
 }
 
+/*
+ * native_window_set_sideband_stream(..., native_handle_t*)
+ * Attach a sideband buffer stream to a native window.
+ */
+static inline int native_window_set_sideband_stream(
+        struct ANativeWindow* window,
+        native_handle_t* sidebandHandle)
+{
+    return window->perform(window, NATIVE_WINDOW_SET_SIDEBAND_STREAM,
+            sidebandHandle);
+}
+
+/*
+ * native_window_set_surface_damage(..., android_native_rect_t* rects, int numRects)
+ * Set the surface damage (i.e., the region of the surface that has changed
+ * since the previous frame). The damage set by this call will be reset (to the
+ * default of full-surface damage) after calling queue, so this must be called
+ * prior to every frame with damage that does not cover the whole surface if the
+ * caller desires downstream consumers to use this optimization.
+ *
+ * The damage region is specified as an array of rectangles, with the important
+ * caveat that the origin of the surface is considered to be the bottom-left
+ * corner, as in OpenGL ES.
+ *
+ * If numRects is set to 0, rects may be NULL, and the surface damage will be
+ * set to the full surface (the same as if this function had not been called for
+ * this frame).
+ */
+static inline int native_window_set_surface_damage(
+        struct ANativeWindow* window,
+        const android_native_rect_t* rects, size_t numRects)
+{
+    return window->perform(window, NATIVE_WINDOW_SET_SURFACE_DAMAGE,
+            rects, numRects);
+}
 
 __END_DECLS
 

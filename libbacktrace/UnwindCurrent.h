@@ -17,40 +17,33 @@
 #ifndef _LIBBACKTRACE_UNWIND_CURRENT_H
 #define _LIBBACKTRACE_UNWIND_CURRENT_H
 
+#include <stdint.h>
+#include <sys/types.h>
+#include <ucontext.h>
+
 #include <string>
 
-#include "Backtrace.h"
-#include "BacktraceThread.h"
+#include <backtrace/Backtrace.h>
+#include <backtrace/BacktraceMap.h>
+
+#include "BacktraceCurrent.h"
 
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
 
-class UnwindCurrent : public BacktraceImpl {
+class UnwindCurrent : public BacktraceCurrent {
 public:
-  UnwindCurrent();
-  virtual ~UnwindCurrent();
+  UnwindCurrent(pid_t pid, pid_t tid, BacktraceMap* map) : BacktraceCurrent(pid, tid, map) {}
+  virtual ~UnwindCurrent() {}
 
-  virtual bool Unwind(size_t num_ignore_frames);
+  std::string GetFunctionNameRaw(uintptr_t pc, uintptr_t* offset) override;
 
-  virtual std::string GetFunctionNameRaw(uintptr_t pc, uintptr_t* offset);
+private:
+  void GetUnwContextFromUcontext(const ucontext_t* ucontext);
 
-  bool UnwindFromContext(size_t num_ignore_frames, bool resolve);
+  bool UnwindFromContext(size_t num_ignore_frames, ucontext_t* ucontext) override;
 
-  void ExtractContext(void* sigcontext);
-
-protected:
   unw_context_t context_;
-};
-
-class UnwindThread : public UnwindCurrent, public BacktraceThreadInterface {
-public:
-  UnwindThread();
-  virtual ~UnwindThread();
-
-  virtual bool Init();
-
-  virtual void ThreadUnwind(
-      siginfo_t* siginfo, void* sigcontext, size_t num_ignore_frames);
 };
 
 #endif // _LIBBACKTRACE_UNWIND_CURRENT_H

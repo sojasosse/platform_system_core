@@ -31,6 +31,10 @@
 
 #include "usb.h"
 
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
 struct sparse_file;
 
 /* protocol.c - fastboot protocol */
@@ -45,11 +49,11 @@ char *fb_get_error(void);
 
 /* engine.c - high level command queue engine */
 int fb_getvar(struct usb_handle *usb, char *response, const char *fmt, ...);
-int fb_format_supported(usb_handle *usb, const char *partition);
+int fb_format_supported(usb_handle *usb, const char *partition, const char *type_override);
 void fb_queue_flash(const char *ptn, void *data, unsigned sz);
 void fb_queue_flash_sparse(const char *ptn, struct sparse_file *s, unsigned sz);
 void fb_queue_erase(const char *ptn);
-void fb_queue_format(const char *ptn, int skip_if_not_supported);
+void fb_queue_format(const char *ptn, int skip_if_not_supported, unsigned int max_chunk_sz);
 void fb_queue_require(const char *prod, const char *var, int invert,
         unsigned nvalues, const char **value);
 void fb_queue_display(const char *var, const char *prettyname);
@@ -65,9 +69,15 @@ int fb_queue_is_empty(void);
 /* util stuff */
 double now();
 char *mkmsg(const char *fmt, ...);
-void die(const char *fmt, ...);
+__attribute__((__noreturn__)) void die(const char *fmt, ...);
+
+void get_my_path(char *path);
 
 /* Current product */
 extern char cur_product[FB_RESPONSE_SZ + 1];
+
+#if defined(__cplusplus)
+}
+#endif
 
 #endif

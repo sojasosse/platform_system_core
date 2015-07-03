@@ -72,13 +72,15 @@ static int wait_for_property(const char *name, const char *desired_value, int ma
         maxnaps = 1;
     }
 
-    while (maxnaps-- > 0) {
-        usleep(NAP_TIME * 1000);
+    while (maxnaps-- >= 0) {
         if (property_get(name, value, NULL)) {
             if (desired_value == NULL || 
                     strcmp(value, desired_value) == 0) {
                 return 0;
             }
+        }
+        if (maxnaps >= 0) {
+            usleep(NAP_TIME * 1000);
         }
     }
     return -1; /* failure */
@@ -92,7 +94,8 @@ static int fill_ip_info(const char *interface,
                      char *server,
                      uint32_t *lease,
                      char *vendorInfo,
-                     char *domain)
+                     char *domain,
+                     char *mtu)
 {
     char prop_name[PROPERTY_KEY_MAX];
     char prop_value[PROPERTY_VALUE_MAX];
@@ -158,15 +161,11 @@ static int fill_ip_info(const char *interface,
             p2p_interface);
     property_get(prop_name, domain, NULL);
 
+    snprintf(prop_name, sizeof(prop_name), "%s.%s.mtu", DHCP_PROP_NAME_PREFIX,
+            p2p_interface);
+    property_get(prop_name, mtu, NULL);
+
     return 0;
-}
-
-static const char *ipaddr_to_string(in_addr_t addr)
-{
-    struct in_addr in_addr;
-
-    in_addr.s_addr = addr;
-    return inet_ntoa(in_addr);
 }
 
 /*
@@ -186,7 +185,8 @@ int dhcp_do_request(const char *interface,
                     char *server,
                     uint32_t *lease,
                     char *vendorInfo,
-                    char *domain)
+                    char *domain,
+                    char *mtu)
 {
     char result_prop_name[PROPERTY_KEY_MAX];
     char daemon_prop_name[PROPERTY_KEY_MAX];
@@ -236,9 +236,8 @@ int dhcp_do_request(const char *interface,
         return -1;
     }
     if (strcmp(prop_value, "ok") == 0) {
-        char dns_prop_name[PROPERTY_KEY_MAX];
         if (fill_ip_info(interface, ipaddr, gateway, prefixLength, dns,
-                server, lease, vendorInfo, domain) == -1) {
+                server, lease, vendorInfo, domain, mtu) == -1) {
             return -1;
         }
         return 0;
@@ -329,7 +328,8 @@ int dhcp_do_request_renew(const char *interface,
                     char *server,
                     uint32_t *lease,
                     char *vendorInfo,
-                    char *domain)
+                    char *domain,
+                    char *mtu)
 {
     char result_prop_name[PROPERTY_KEY_MAX];
     char prop_value[PROPERTY_VALUE_MAX] = {'\0'};
@@ -366,7 +366,7 @@ int dhcp_do_request_renew(const char *interface,
     }
     if (strcmp(prop_value, "ok") == 0) {
         return fill_ip_info(interface, ipaddr, gateway, prefixLength, dns,
-                server, lease, vendorInfo, domain);
+                server, lease, vendorInfo, domain, mtu);
     } else {
         snprintf(errmsg, sizeof(errmsg), "DHCP Renew result was %s", prop_value);
         return -1;
